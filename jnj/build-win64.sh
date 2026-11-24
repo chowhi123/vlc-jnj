@@ -2,14 +2,16 @@
 set -euo pipefail
 
 # Use a Linux checkout for Autotools and preserve edits from the Windows checkout.
-source_git() { git -c safe.directory=/source -C /source "$@"; }
-git -c safe.directory=/source clone --quiet --shared /source /tmp/vlc
+# The read-only bind mount belongs to the host user.
+git config --global --add safe.directory /source
+git config --global --add safe.directory /source/.git
+git clone --quiet --shared /source /tmp/vlc
 cd /tmp/vlc
-source_git diff --no-ext-diff --no-textconv --binary HEAD -- > /tmp/working.patch
+git -C /source diff --no-ext-diff --no-textconv --binary HEAD -- > /tmp/working.patch
 if [[ -s /tmp/working.patch ]]; then
     git apply --whitespace=nowarn /tmp/working.patch
 fi
-source_git ls-files --others --exclude-standard -z |
+git -C /source ls-files --others --exclude-standard -z |
     tar -C /source --null -T - -cf - | tar -xf -
 
 # Use the same dependency bundle as CI when its inputs match this checkout.
