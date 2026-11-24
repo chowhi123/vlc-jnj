@@ -93,6 +93,7 @@ int CommonInit(vout_display_t *vd)
     sys->pf_GetPictureHeight = GetPictureHeight;
 #if !VLC_WINSTORE_APP
     sys->pf_GetWindowSize = GetWindowSize;
+    sys->windowed_placement.length = 0;
     SetRectEmpty(&sys->rect_display);
     SetRectEmpty(&sys->rect_parent);
 
@@ -555,6 +556,45 @@ static void CommonChangeThumbnailClip(vout_display_t *vd, bool show)
     CoUninitialize();
 }
 
+struct monitor_search {
+    HMONITOR primary;
+    int64_t remaining;
+    HMONITOR result;
+};
+
+static BOOL CALLBACK FindSecondaryMonitor(HMONITOR monitor, HDC dc, LPRECT rect,
+                                          LPARAM opaque)
+{
+    VLC_UNUSED(dc);
+    VLC_UNUSED(rect);
+    struct monitor_search *search = (struct monitor_search *)opaque;
+    if (monitor != search->primary && --search->remaining == 0) {
+        search->result = monitor;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static HMONITOR StandaloneFullscreenMonitor(vout_display_t *vd, HWND hwnd)
+{
+    if (config_FindConfig("qt-fullscreen-screennumber")) {
+        int64_t screen = var_InheritInteger(vd, "qt-fullscreen-screennumber");
+        if (screen >= 0) {
+            /* Qt's Windows screen list starts with the primary monitor, then
+             * the other monitors in EnumDisplayMonitors order. */
+            POINT origin = { 0, 0 };
+            HMONITOR primary = MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY);
+            if (screen == 0)
+                return primary;
+            struct monitor_search search = { primary, screen, NULL };
+            EnumDisplayMonitors(NULL, NULL, FindSecondaryMonitor, (LPARAM)&search);
+            if (search.result != NULL)
+                return search.result;
+        }
+    }
+    return MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+}
+
 static int CommonControlSetFullscreen(vout_display_t *vd, bool is_fullscreen)
 {
     vout_display_sys_t *sys = vd->sys;
@@ -571,36 +611,33 @@ static int CommonControlSetFullscreen(vout_display_t *vd, bool is_fullscreen)
     /* */
     HWND hwnd = sys->hparent && sys->hfswnd ? sys->hfswnd : sys->hwnd;
 
-    /* Save the current windows placement/placement to restore
-       when fullscreen is over */
-    WINDOWPLACEMENT window_placement;
-    window_placement.length = sizeof(WINDOWPLACEMENT);
-    GetWindowPlacement(hwnd, &window_placement);
+    if (!sys->hparent && is_fullscreen == (sys->windowed_placement.length != 0))
+        return VLC_SUCCESS;
 
     if (is_fullscreen) {
         msg_Dbg(vd, "entering fullscreen mode");
 
-        /* Change window style, no borders and no title bar */
-        SetWindowLong(hwnd, GWL_STYLE, WS_CLIPCHILDREN | WS_VISIBLE);
+        HMONITOR monitor = sys->hparent
+                         ? MonitorFromWindow(sys->hparent, MONITOR_DEFAULTTONEAREST)
+                         : StandaloneFullscreenMonitor(vd, hwnd);
+        MONITORINFO mi = { .cbSize = sizeof(mi) };
+        if (!GetMonitorInfo(monitor, &mi))
+            return VLC_EGENERIC;
 
-        if (sys->hparent) {
-            /* Retrieve current window position so fullscreen will happen
-            *on the right screen */
-            HMONITOR hmon = MonitorFromWindow(sys->hparent,
-                                              MONITOR_DEFAULTTONEAREST);
-            MONITORINFO mi;
-            mi.cbSize = sizeof(MONITORINFO);
-            if (GetMonitorInfo(hmon, &mi))
-                SetWindowPos(hwnd, 0,
-                             mi.rcMonitor.left,
-                             mi.rcMonitor.top,
-                             mi.rcMonitor.right - mi.rcMonitor.left,
-                             mi.rcMonitor.bottom - mi.rcMonitor.top,
-                             SWP_NOZORDER|SWP_FRAMECHANGED);
-        } else {
-            /* Maximize non embedded window */
-            ShowWindow(hwnd, SW_SHOWMAXIMIZED);
+        WINDOWPLACEMENT placement = { .length = sizeof(placement) };
+        if (!sys->hparent && !GetWindowPlacement(hwnd, &placement))
+            return VLC_EGENERIC;
+
+        LONG style = SetWindowLong(hwnd, GWL_STYLE, WS_POPUP | WS_CLIPCHILDREN | WS_VISIBLE);
+        if (!SetWindowPos(hwnd, NULL, mi.rcMonitor.left, mi.rcMonitor.top,
+                          mi.rcMonitor.right - mi.rcMonitor.left,
+                          mi.rcMonitor.bottom - mi.rcMonitor.top,
+                          SWP_NOZORDER | SWP_FRAMECHANGED)) {
+            SetWindowLong(hwnd, GWL_STYLE, style);
+            return VLC_EGENERIC;
         }
+        if (!sys->hparent)
+            sys->windowed_placement = placement;
 
         if (sys->hparent) {
             /* Hide the previous window */
@@ -635,8 +672,9 @@ static int CommonControlSetFullscreen(vout_display_t *vd, bool is_fullscreen)
             ShowWindow(hwnd, SW_HIDE);
         } else {
             /* return to normal window for non embedded vout */
-            SetWindowPlacement(hwnd, &window_placement);
-            ShowWindow(hwnd, SW_SHOWNORMAL);
+            if (!SetWindowPlacement(hwnd, &sys->windowed_placement))
+                return VLC_EGENERIC;
+            sys->windowed_placement.length = 0;
         }
     }
     return VLC_SUCCESS;

@@ -45,6 +45,9 @@ typedef struct vout_display_sys_win32_t
     struct vout_window_t *parent_window;         /* Parent window VLC object */
     HWND                 hparent;             /* Handle of the parent window */
     HWND                 hfswnd;          /* Handle of the fullscreen window */
+#if !VLC_WINSTORE_APP
+    WINDOWPLACEMENT      windowed_placement; /* Standalone window before fullscreen */
+#endif
 
     /* size of the display */
     RECT         rect_display;
